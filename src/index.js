@@ -54,6 +54,29 @@ const envKey = (s) => s.toUpperCase().replace(/-/g, "_");
 const cfg = (env, service, key, account) =>
   (account && env[`${envKey(service)}_${envKey(account)}_${key}`]) || env[`${envKey(service)}_${key}`];
 
+// Slack app client IDs look like "1234567890.1234567890". When claude.ai is configured with
+// "Use your own OAuth client", it presents that ID (and secret) to *us*; we pass them straight
+// through to Slack instead of needing Worker vars.
+const isSlackAppId = (id) => /^\d{6,}\.\d{6,}$/.test(id || "");
+
+// Register an unknown BYO client ID with the OAuth provider so parseAuthRequest accepts it.
+async function ensurePassthroughClient(env, clientId, redirectUri) {
+  const key = `client:${clientId}`;
+  const existing = await env.OAUTH_KV.get(key, "json");
+  if (existing) {
+    if (!existing.redirectUris.includes(redirectUri)) { existing.redirectUris.push(redirectUri); await env.OAUTH_KV.put(key, JSON.stringify(existing)); }
+    return existing;
+  }
+  const info = {
+    clientId, redirectUris: [redirectUri], clientName: "claude.ai (BYO client)",
+    grantTypes: ["authorization_code", "refresh_token"], responseTypes: ["code"],
+    registrationDate: Math.floor(Date.now() / 1000),
+    tokenEndpointAuthMethod: "client_secret_post", authMethodExplicit: true, passthrough: true,
+  };
+  await env.OAUTH_KV.put(key, JSON.stringify(info));
+  return info;
+}
+
 // ---------- upstream OAuth discovery (RFC 9728 + RFC 8414) ----------
 
 async function discover(service) {
@@ -82,7 +105,8 @@ async function discover(service) {
 }
 
 // Get an upstream OAuth client: configured (env) or dynamically registered (cached in KV).
-async function upstreamClient(env, service, account, meta, callback) {
+async function upstreamClient(env, service, account, meta, callback, passthroughId) {
+  if (passthroughId) return { client_id: passthroughId, source: "passthrough" };
   const id = cfg(env, service, "CLIENT_ID", account);
   if (id) return { client_id: id, client_secret: cfg(env, service, "CLIENT_SECRET", account) || undefined, source: "env" };
   const key = `upclient:${service}:${callback}`;
@@ -124,6 +148,10 @@ async function tokenRequest(tok, params) {
 
 async function handleAuthorize(request, env) {
   const url = new URL(request.url);
+  const rawClientId = url.searchParams.get("client_id") || "";
+  const known = isSlackAppId(rawClientId) ? await env.OAUTH_KV.get(`client:${rawClientId}`, "json") : null;
+  const passthrough = isSlackAppId(rawClientId) && (!known || known.passthrough === true);
+  if (passthrough) await ensurePassthroughClient(env, rawClientId, url.searchParams.get("redirect_uri") || "");
   let authReq;
   try { authReq = await env.OAUTH_PROVIDER.parseAuthRequest(request); }
   catch (e) { return html(`<h1>Authorization error</h1><p>${escape(e.message)}</p>`, 400); }
@@ -148,7 +176,7 @@ async function handleAuthorize(request, env) {
   let disc, client;
   try {
     disc = await discover(service);
-    client = await upstreamClient(env, service, account, disc.meta, callback);
+    client = await upstreamClient(env, service, account, disc.meta, callback, passthrough ? rawClientId : null);
   } catch (e) { return html(`<h1>Upstream setup failed</h1><p>${escape(e.message)}</p>`, 502); }
 
   const state = rand(24);
@@ -156,7 +184,7 @@ async function handleAuthorize(request, env) {
   const scopes = (cfg(env, service, "SCOPES", account) || disc.scopes.join(" ")).trim();
 
   await env.OAUTH_KV.put(`st:${state}`, JSON.stringify({
-    authReq, service, account, verifier, callback,
+    authReq, service, account, verifier, callback, passthrough: client.source === "passthrough",
     token_endpoint: disc.meta.token_endpoint, client_id: client.client_id, client_secret: client.client_secret,
     resource: disc.resource, scopes,
   }), { expirationTtl: FLOW_TTL });
@@ -181,19 +209,19 @@ async function handleCallback(request, env) {
   await env.OAUTH_KV.delete(`st:${state}`);
   if (url.searchParams.get("error")) return html(`<h1>${escape(flow.service)} denied the request</h1><p>${escape(url.searchParams.get("error_description") || url.searchParams.get("error"))}</p>`, 400);
 
-  let tokens;
-  try {
-    tokens = await tokenRequest(flow, {
-      grant_type: "authorization_code", code: url.searchParams.get("code"),
-      redirect_uri: flow.callback, code_verifier: flow.verifier, resource: flow.resource,
-    });
-  } catch (e) { return html(`<h1>Token exchange failed</h1><p>${escape(e.message)}</p>`, 502); }
-
   const sid = rand(24);
-  await env.OAUTH_KV.put(`up:${sid}`, JSON.stringify({
-    ...tokens, token_endpoint: flow.token_endpoint, client_id: flow.client_id, client_secret: flow.client_secret,
-    resource: flow.resource, service: flow.service, account: flow.account, created_at: Math.floor(Date.now() / 1000),
-  }));
+  const upstreamCode = url.searchParams.get("code");
+  if (!flow.passthrough) {
+    // We hold the upstream client credentials: exchange the code now.
+    let tokens;
+    try {
+      tokens = await tokenRequest(flow, { grant_type: "authorization_code", code: upstreamCode, redirect_uri: flow.callback, code_verifier: flow.verifier, resource: flow.resource });
+    } catch (e) { return html(`<h1>Token exchange failed</h1><p>${escape(e.message)}</p>`, 502); }
+    await env.OAUTH_KV.put(`up:${sid}`, JSON.stringify({
+      ...tokens, token_endpoint: flow.token_endpoint, client_id: flow.client_id, client_secret: flow.client_secret,
+      resource: flow.resource, service: flow.service, account: flow.account, created_at: Math.floor(Date.now() / 1000),
+    }));
+  }
 
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
     request: flow.authReq,
@@ -202,8 +230,51 @@ async function handleCallback(request, env) {
     metadata: { service: flow.service, account: flow.account },
     props: { sid, service: flow.service, account: flow.account },
   });
+
+  if (flow.passthrough) {
+    // The client secret only arrives with Claude's /token call, so park the upstream code
+    // against our grant id (embedded in the auth code we just minted) until then.
+    const grantId = (new URL(redirectTo).searchParams.get("code") || "").split(":")[1];
+    await env.OAUTH_KV.put(`pend:${grantId}`, JSON.stringify({
+      sid, code: upstreamCode, verifier: flow.verifier, callback: flow.callback, token_endpoint: flow.token_endpoint,
+      client_id: flow.client_id, resource: flow.resource, service: flow.service, account: flow.account,
+    }), { expirationTtl: FLOW_TTL });
+  }
   return Response.redirect(redirectTo, 302);
 }
+
+// /token interception for pass-through clients: verify the secret against the upstream by doing
+// the deferred code exchange, then hand the request on to the OAuth provider.
+async function interceptToken(request, env) {
+  const form = await request.clone().formData().catch(() => null);
+  if (!form) return null;
+  const clientId = form.get("client_id"), secret = form.get("client_secret");
+  if (!clientId || !secret || !isSlackAppId(clientId)) return null;
+  const client = await env.OAUTH_KV.get(`client:${clientId}`, "json");
+  if (!client?.passthrough) return null;
+
+  if (form.get("grant_type") === "authorization_code") {
+    const grantId = (form.get("code") || "").split(":")[1];
+    const pend = grantId && await env.OAUTH_KV.get(`pend:${grantId}`, "json");
+    if (!pend) return json({ error: "invalid_grant", error_description: "Pending upstream authorization not found or expired; reconnect" }, 400);
+    let tokens;
+    try {
+      tokens = await tokenRequest({ ...pend, client_secret: secret }, { grant_type: "authorization_code", code: pend.code, redirect_uri: pend.callback, code_verifier: pend.verifier, resource: pend.resource });
+    } catch (e) {
+      return json({ error: "invalid_client", error_description: `${SERVICES[pend.service].name} rejected the client credentials: ${e.message}` }, 401);
+    }
+    await env.OAUTH_KV.delete(`pend:${grantId}`);
+    await env.OAUTH_KV.put(`up:${pend.sid}`, JSON.stringify({
+      ...tokens, token_endpoint: pend.token_endpoint, client_id: pend.client_id, client_secret: secret,
+      resource: pend.resource, service: pend.service, account: pend.account, created_at: Math.floor(Date.now() / 1000),
+    }));
+    // Upstream accepted the secret, so record it (hashed) for the provider's own client auth.
+    if (!client.clientSecret) { client.clientSecret = await hashHex(secret); await env.OAUTH_KV.put(`client:${clientId}`, JSON.stringify(client)); }
+  }
+  return null; // fall through to the provider with the original request
+}
+
+const hashHex = async (s) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)))).map((b) => b.toString(16).padStart(2, "0")).join("");
 
 function landing(request) {
   const origin = new URL(request.url).origin;
@@ -283,7 +354,7 @@ const defaultHandler = {
   },
 };
 
-export default new OAuthProvider({
+const provider = new OAuthProvider({
   apiRoute: ["/slack/", "/sentry/", "/trello/"],
   apiHandler,
   defaultHandler,
@@ -292,3 +363,13 @@ export default new OAuthProvider({
   clientRegistrationEndpoint: "/register",
   accessTokenTTL: 3600,
 });
+
+export default {
+  async fetch(request, env, ctx) {
+    if (new URL(request.url).pathname === "/token" && request.method === "POST") {
+      const early = await interceptToken(request, env);
+      if (early) return early;
+    }
+    return provider.fetch(request, env, ctx);
+  },
+};

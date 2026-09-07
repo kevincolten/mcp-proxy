@@ -8,7 +8,7 @@ https://mcp.austindevs.com/<service>/<account>/mcp
 
 | service | upstream                     | upstream auth                              |
 |---------|------------------------------|--------------------------------------------|
-| slack   | https://mcp.slack.com/mcp    | one internal Slack app per workspace (no DCR) — `SLACK_<ACCOUNT>_CLIENT_ID` + `SLACK_<ACCOUNT>_CLIENT_SECRET` |
+| slack   | https://mcp.slack.com/mcp    | your own internal Slack app per workspace — entered in claude.ai as *Use your own OAuth client* (or Worker vars) |
 | sentry  | https://mcp.sentry.dev/mcp   | dynamic client registration (automatic)    |
 | trello  | https://mcp.trello.com/v1    | dynamic client registration (automatic)    |
 
@@ -32,15 +32,25 @@ upstream consent screen.
 Customize → Connectors → **Add custom connector** → URL `https://mcp.austindevs.com/slack/zollege/mcp`
 (no client id/secret needed) → Connect → log into the workspace you want.
 
-## Config (Worker vars/secrets)
+## Slack (bring your own client, no Worker config)
 
-* Slack only lets **internal** (or Marketplace-listed) apps use its MCP server, so create one app
-  *in each workspace* at api.slack.com: enable **Agents → Slack Model Context Protocol (MCP) Server**,
-  add `https://mcp.austindevs.com/callback` under OAuth & Permissions → Redirect URLs, add the
-  *user* scopes from https://mcp.slack.com/.well-known/oauth-protected-resource, then set
-  `SLACK_<ACCOUNT>_CLIENT_ID` (var) and `SLACK_<ACCOUNT>_CLIENT_SECRET` (secret) on the Worker, where
-  `<ACCOUNT>` is the connector label upper-cased (`zollege` → `SLACK_ZOLLEGE_*`). `SLACK_CLIENT_ID` /
-  `SLACK_CLIENT_SECRET` without an account act as defaults; `SLACK_<ACCOUNT>_SCOPES` trims the scopes.
+Slack's MCP server has no dynamic client registration and only allows **internal** (or
+Marketplace-listed) apps, so you need one Slack app per workspace. Then, in claude.ai's *Add custom
+connector* dialog, choose **OAuth client → Use your own OAuth client** and paste that app's
+client ID and secret. The Worker recognises the `1234567890.1234567890` ID format, uses it as the
+Slack app for that connector, and completes the Slack code exchange with the secret Claude sends
+at `/token` — nothing to configure on the Worker.
+
+Per workspace at api.slack.com/apps: create app → *Agents* → enable **Slack Model Context Protocol
+(MCP) Server** → *OAuth & Permissions* → add redirect URL `https://mcp.austindevs.com/callback` and
+the *user* scopes you want (see https://mcp.slack.com/.well-known/oauth-protected-resource) →
+copy Client ID / Client Secret from *Basic Information*.
+
+## Config (optional Worker vars/secrets)
+
+* `SLACK_<ACCOUNT>_CLIENT_ID` / `SLACK_<ACCOUNT>_CLIENT_SECRET` (or `SLACK_CLIENT_ID` / `SLACK_CLIENT_SECRET`)
+  — alternative to BYO client: lets a plain DCR connector work for `/slack/<account>/mcp`.
+* `<SERVICE>_<ACCOUNT>_SCOPES` / `<SERVICE>_SCOPES` — trim the scopes requested upstream.
 * `SENTRY_*` / `TRELLO_*` — optional; DCR is used when unset.
 
 ## Build & deploy
