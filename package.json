@@ -1,0 +1,11 @@
+{
+  "name": "mcp-proxy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/index.js --bundle --format=esm --platform=browser --target=es2022 --external:cloudflare:workers --minify --outfile=dist/worker.min.js",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": { "@cloudflare/workers-oauth-provider": "^0.10.3" },
+  "devDependencies": { "esbuild": "^0.25.0", "wrangler": "^4" }
+}
