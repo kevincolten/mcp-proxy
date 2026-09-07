@@ -49,7 +49,10 @@ function parsePath(pathname) {
   return m ? { service: m[1].toLowerCase(), account: m[2].toLowerCase() } : null;
 }
 
-const cfg = (env, service, key) => env[`${service.toUpperCase()}_${key}`];
+// Per-account config wins over per-service: SLACK_ZOLLEGE_CLIENT_ID, then SLACK_CLIENT_ID.
+const envKey = (s) => s.toUpperCase().replace(/-/g, "_");
+const cfg = (env, service, key, account) =>
+  (account && env[`${envKey(service)}_${envKey(account)}_${key}`]) || env[`${envKey(service)}_${key}`];
 
 // ---------- upstream OAuth discovery (RFC 9728 + RFC 8414) ----------
 
@@ -79,13 +82,13 @@ async function discover(service) {
 }
 
 // Get an upstream OAuth client: configured (env) or dynamically registered (cached in KV).
-async function upstreamClient(env, service, meta, callback) {
-  const id = cfg(env, service, "CLIENT_ID");
-  if (id) return { client_id: id, client_secret: cfg(env, service, "CLIENT_SECRET") || undefined, source: "env" };
+async function upstreamClient(env, service, account, meta, callback) {
+  const id = cfg(env, service, "CLIENT_ID", account);
+  if (id) return { client_id: id, client_secret: cfg(env, service, "CLIENT_SECRET", account) || undefined, source: "env" };
   const key = `upclient:${service}:${callback}`;
   const cached = await env.OAUTH_KV.get(key, "json");
   if (cached) return cached;
-  if (!meta.registration_endpoint) throw new Error(`${SERVICES[service].name} does not support dynamic client registration; set ${service.toUpperCase()}_CLIENT_ID (and _CLIENT_SECRET) on the Worker.`);
+  if (!meta.registration_endpoint) throw new Error(`${SERVICES[service].name} does not support dynamic client registration; set ${envKey(service)}_${envKey(account)}_CLIENT_ID and _CLIENT_SECRET (or the ${envKey(service)}_ defaults) on the Worker.`);
   const r = await fetch(meta.registration_endpoint, {
     method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify({
@@ -145,12 +148,12 @@ async function handleAuthorize(request, env) {
   let disc, client;
   try {
     disc = await discover(service);
-    client = await upstreamClient(env, service, disc.meta, callback);
+    client = await upstreamClient(env, service, account, disc.meta, callback);
   } catch (e) { return html(`<h1>Upstream setup failed</h1><p>${escape(e.message)}</p>`, 502); }
 
   const state = rand(24);
   const verifier = rand(48);
-  const scopes = (cfg(env, service, "SCOPES") || disc.scopes.join(" ")).trim();
+  const scopes = (cfg(env, service, "SCOPES", account) || disc.scopes.join(" ")).trim();
 
   await env.OAUTH_KV.put(`st:${state}`, JSON.stringify({
     authReq, service, account, verifier, callback,

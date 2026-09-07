@@ -7,7 +7,7 @@
   "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "5fbee83cd20b4dfb9b624803b03c0a30" }],
   "routes": [{ "pattern": "mcp.austindevs.com", "custom_domain": true }]
   // Per-service upstream OAuth client config (vars / secrets):
-  //   SLACK_CLIENT_ID, SLACK_CLIENT_SECRET (required: Slack has no DCR)
+  //   SLACK_<ACCOUNT>_CLIENT_ID + SLACK_<ACCOUNT>_CLIENT_SECRET per workspace (Slack MCP only allows internal apps, one per workspace; SLACK_CLIENT_ID/_SECRET act as defaults)
   //   SENTRY_CLIENT_ID / SENTRY_CLIENT_SECRET, TRELLO_CLIENT_ID / TRELLO_CLIENT_SECRET (optional: DCR is used otherwise)
   //   <SERVICE>_SCOPES (optional: override the scopes requested upstream)
 }

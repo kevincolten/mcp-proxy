@@ -8,7 +8,7 @@ https://mcp.austindevs.com/<service>/<account>/mcp
 
 | service | upstream                     | upstream auth                              |
 |---------|------------------------------|--------------------------------------------|
-| slack   | https://mcp.slack.com/mcp    | your own Slack app (no DCR) — set `SLACK_CLIENT_ID` + `SLACK_CLIENT_SECRET` |
+| slack   | https://mcp.slack.com/mcp    | one internal Slack app per workspace (no DCR) — `SLACK_<ACCOUNT>_CLIENT_ID` + `SLACK_<ACCOUNT>_CLIENT_SECRET` |
 | sentry  | https://mcp.sentry.dev/mcp   | dynamic client registration (automatic)    |
 | trello  | https://mcp.trello.com/v1    | dynamic client registration (automatic)    |
 
@@ -34,10 +34,13 @@ Customize → Connectors → **Add custom connector** → URL `https://mcp.austi
 
 ## Config (Worker vars/secrets)
 
-* `SLACK_CLIENT_ID` (var) and `SLACK_CLIENT_SECRET` (secret) — create an app at api.slack.com,
-  add `https://mcp.austindevs.com/callback` as a redirect URL, and grant it the user scopes listed
-  at https://mcp.slack.com/.well-known/oauth-protected-resource (or set `SLACK_SCOPES` to a subset).
-  The same app can be installed into multiple workspaces.
+* Slack only lets **internal** (or Marketplace-listed) apps use its MCP server, so create one app
+  *in each workspace* at api.slack.com: enable **Agents → Slack Model Context Protocol (MCP) Server**,
+  add `https://mcp.austindevs.com/callback` under OAuth & Permissions → Redirect URLs, add the
+  *user* scopes from https://mcp.slack.com/.well-known/oauth-protected-resource, then set
+  `SLACK_<ACCOUNT>_CLIENT_ID` (var) and `SLACK_<ACCOUNT>_CLIENT_SECRET` (secret) on the Worker, where
+  `<ACCOUNT>` is the connector label upper-cased (`zollege` → `SLACK_ZOLLEGE_*`). `SLACK_CLIENT_ID` /
+  `SLACK_CLIENT_SECRET` without an account act as defaults; `SLACK_<ACCOUNT>_SCOPES` trims the scopes.
 * `SENTRY_*` / `TRELLO_*` — optional; DCR is used when unset.
 
 ## Build & deploy
